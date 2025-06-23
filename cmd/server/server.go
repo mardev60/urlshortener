@@ -11,7 +11,6 @@ import (
 
 	"github.com/axellelanca/urlshortener/cmd"
 	"github.com/axellelanca/urlshortener/internal/api"
-	"github.com/axellelanca/urlshortener/internal/models"
 	"github.com/axellelanca/urlshortener/internal/monitor"
 	"github.com/axellelanca/urlshortener/internal/repository"
 	"github.com/axellelanca/urlshortener/internal/services"
@@ -51,8 +50,14 @@ puis lance le serveur HTTP.`,
 
 		log.Println("Services métiers initialisés.")
 
-		// Initialiser le channel des événements de clic et lancer les workers
-		clickEvents := make(chan models.ClickEvent, cmd.Cfg.Analytics.BufferSize)
+		// Configurer le routeur Gin et les handlers API
+		router := gin.Default()
+		api.SetupRoutes(router, linkService, cmd.Cfg.Analytics.BufferSize)
+
+		log.Println("Routes API configurées.")
+
+		// Récupérer le channel des événements de clic et lancer les workers
+		clickEvents := api.GetClickEventsChannel()
 		workers.StartClickWorkers(clickEvents, clickRepo, cmd.Cfg.Analytics.WorkerCount)
 
 		log.Printf("Channel d'événements de clic initialisé avec un buffer de %d. %d worker(s) de clics démarré(s).",
@@ -63,12 +68,6 @@ puis lance le serveur HTTP.`,
 		urlMonitor := monitor.NewUrlMonitor(linkRepo, monitorInterval)
 		go urlMonitor.Start()
 		log.Printf("Moniteur d'URLs démarré avec un intervalle de %v.", monitorInterval)
-
-		// Configurer le routeur Gin et les handlers API
-		router := gin.Default()
-		api.SetupRoutes(router, linkService, cmd.Cfg.Analytics.BufferSize)
-
-		log.Println("Routes API configurées.")
 
 		// Créer le serveur HTTP Gin
 		serverAddr := fmt.Sprintf(":%d", cmd.Cfg.Server.Port)
