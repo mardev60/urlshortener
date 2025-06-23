@@ -1,7 +1,6 @@
 package server
 
 import (
-	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -10,7 +9,7 @@ import (
 	"syscall"
 	"time"
 
-	cmd2 "github.com/axellelanca/urlshortener/cmd"
+	"github.com/axellelanca/urlshortener/cmd"
 	"github.com/axellelanca/urlshortener/internal/api"
 	"github.com/axellelanca/urlshortener/internal/models"
 	"github.com/axellelanca/urlshortener/internal/monitor"
@@ -19,86 +18,85 @@ import (
 	"github.com/axellelanca/urlshortener/internal/workers"
 	"github.com/gin-gonic/gin"
 	"github.com/spf13/cobra"
-	"gorm.io/driver/sqlite" // Driver SQLite pour GORM
+	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
 
 // RunServerCmd représente la commande 'run-server' de Cobra.
-// C'est le point d'entrée pour lancer le serveur de l'application.
 var RunServerCmd = &cobra.Command{
 	Use:   "run-server",
 	Short: "Lance le serveur API de raccourcissement d'URLs et les processus de fond.",
 	Long: `Cette commande initialise la base de données, configure les APIs,
 démarre les workers asynchrones pour les clics et le moniteur d'URLs,
 puis lance le serveur HTTP.`,
-	Run: func(cmd *cobra.Command, args []string) {
-		// TODO : Charger la configuration chargée globalement via cmd.cfg
-		// Ne pas oublier la gestion d'erreur (si nil ?), si erreur, faire un log.Fataf
+	Run: func(cobraCmd *cobra.Command, args []string) {
+		if cmd.Cfg == nil {
+			log.Fatal("FATAL: La configuration n'est pas initialisée")
+		}
 
-		// TODO : Initialiser la connexion à la base de données SQLite avec GORM.
-		// Utilisez le nom de la base de données depuis la configuration (cfg.Database.Name).
+		// Initialiser la connexion à la base de données SQLite
+		db, err := gorm.Open(sqlite.Open(cmd.Cfg.Database.Name), &gorm.Config{})
+		if err != nil {
+			log.Fatalf("FATAL: Échec de la connexion à la base de données: %v", err)
+		}
 
-		// TODO : Initialiser les repositories.
-		// Créez des instances de GormLinkRepository et GormClickRepository.
+		// Initialiser les repositories
+		linkRepo := repository.NewLinkRepository(db)
+		clickRepo := repository.NewClickRepository(db)
 
-		// Laissez le log
 		log.Println("Repositories initialisés.")
 
-		// TODO : Initialiser les services métiers.
-		// Créez des instances de LinkService et ClickService, en leur passant les repositories nécessaires.
+		// Initialiser les services métiers
+		linkService := services.NewLinkService(linkRepo)
 
-		// Laissez le log
 		log.Println("Services métiers initialisés.")
 
-		// TODO : Initialiser le channel ClickEventsChannel (api/handlers) des événements de clic et lancer les workers (StartClickWorkers).
-		// Le channel est bufferisé avec la taille configurée.
-		// Passez le channel et le clickRepo aux workers.
+		// Initialiser le channel des événements de clic et lancer les workers
+		clickEvents := make(chan models.ClickEvent, cmd.Cfg.Analytics.BufferSize)
+		workers.StartClickWorkers(clickEvents, clickRepo, cmd.Cfg.Analytics.WorkerCount)
 
-		// TODO : Remplacer les XXX par les bonnes variables
 		log.Printf("Channel d'événements de clic initialisé avec un buffer de %d. %d worker(s) de clics démarré(s).",
-			XXX, XXX)
+			cmd.Cfg.Analytics.BufferSize, cmd.Cfg.Analytics.WorkerCount)
 
-		// TODO : Initialiser et lancer le moniteur d'URLs.
-		// Utilisez l'intervalle configuré (cfg.Monitor.IntervalMinutes).
-		// Lancez le moniteur dans sa propre goroutine.
-		monitorInterval := time.Duration(XXX) * time.Minute
-		urlMonitor := monitor.NewUrlMonitor() // Le moniteur a besoin du linkRepo et de l'interval
+		// Initialiser et lancer le moniteur d'URLs
+		monitorInterval := time.Duration(cmd.Cfg.Monitor.IntervalMinutes) * time.Minute
+		urlMonitor := monitor.NewUrlMonitor(linkRepo, monitorInterval)
 		go urlMonitor.Start()
 		log.Printf("Moniteur d'URLs démarré avec un intervalle de %v.", monitorInterval)
 
-		// TODO : Configurer le routeur Gin et les handlers API.
-		// Passez les services nécessaires aux fonctions de configuration des routes.
+		// Configurer le routeur Gin et les handlers API
+		router := gin.Default()
+		api.SetupRoutes(router, linkService, cmd.Cfg.Analytics.BufferSize)
 
-		// Pas toucher au log
 		log.Println("Routes API configurées.")
 
 		// Créer le serveur HTTP Gin
-		serverAddr := fmt.Sprintf(":%d", cfg.Server.Port)
+		serverAddr := fmt.Sprintf(":%d", cmd.Cfg.Server.Port)
 		srv := &http.Server{
 			Addr:    serverAddr,
 			Handler: router,
 		}
 
-		// TODO : Démarrer le serveur Gin dans une goroutine anonyme pour ne pas bloquer.
-		// Pensez à logger des ptites informations...
+		// Gérer l'arrêt gracieux
+		go func() {
+			quit := make(chan os.Signal, 1)
+			signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+			<-quit
 
-		// Gére l'arrêt propre du serveur (graceful shutdown).
-		// Créez un channel pour les signaux OS (SIGINT, SIGTERM).
-		quit := make(chan os.Signal, 1)
-		signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM) // Attendre Ctrl+C ou signal d'arrêt
+			log.Println("Arrêt du serveur...")
+			if err := srv.Close(); err != nil {
+				log.Printf("Erreur lors de la fermeture du serveur: %v", err)
+			}
+		}()
 
-		// Bloquer jusqu'à ce qu'un signal d'arrêt soit reçu.
-		<-quit
-		log.Println("Signal d'arrêt reçu. Arrêt du serveur...")
-
-		// Arrêt propre du serveur HTTP avec un timeout.
-		log.Println("Arrêt en cours... Donnez un peu de temps aux workers pour finir.")
-		time.Sleep(5 * time.Second)
-
-		log.Println("Serveur arrêté proprement.")
+		// Démarrer le serveur
+		log.Printf("Serveur démarré sur %s", serverAddr)
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("FATAL: Erreur lors du démarrage du serveur: %v", err)
+		}
 	},
 }
 
 func init() {
-	// TODO : ajouter la commande
+	cmd.RootCmd.AddCommand(RunServerCmd)
 }
